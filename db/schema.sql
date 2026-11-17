@@ -39,7 +39,8 @@ CREATE TABLE ventas (
   producto_id int REFERENCES productos ON DELETE SET NULL,
   sabor text NOT NULL, tamano_oz int NOT NULL,
   cantidad int NOT NULL CHECK (cantidad > 0),
-  precio_unit numeric(12,2) NOT NULL, costo_unit numeric(14,4) NOT NULL
+  precio_unit numeric(12,2) NOT NULL, costo_unit numeric(14,4) NOT NULL,
+  medio_pago text NOT NULL DEFAULT 'Efectivo'
 );
 CREATE TABLE venta_consumos (  -- para devolver el stock si se borra la venta
   venta_id int REFERENCES ventas ON DELETE CASCADE,
@@ -51,11 +52,12 @@ CREATE TABLE compras (
   proveedor_id int REFERENCES proveedores ON DELETE SET NULL,
   insumo_id int REFERENCES insumos ON DELETE SET NULL,
   descripcion text, presentaciones numeric NOT NULL DEFAULT 1 CHECK (presentaciones > 0),
-  total numeric(14,2) NOT NULL CHECK (total >= 0), agregado numeric(16,3) NOT NULL DEFAULT 0
+  total numeric(14,2) NOT NULL CHECK (total >= 0), agregado numeric(16,3) NOT NULL DEFAULT 0,
+  factura text, factura_nombre text
 );
 CREATE TABLE gastos (
   id serial PRIMARY KEY, fecha date NOT NULL DEFAULT CURRENT_DATE,
   tipo text NOT NULL CHECK (tipo IN ('Luz','Agua recargable','Arriendo máquina','Otro')),
-  nota text, valor numeric(14,2) NOT NULL CHECK (valor >= 0)
+  nota text, valor numeric(14,2) NOT NULL CHECK (valor >= 0), factura text, factura_nombre text
 );
 CREATE INDEX ON ventas (fecha); CREATE INDEX ON compras (fecha); CREATE INDEX ON gastos (fecha);

@@ -1,0 +1,1 @@
+/** @typedef {{ nombre: string, tamano_oz: number, precio: number|string, vaso_id: number|string, licor_id: number|string, jeringas: number, foto: string, dulces: Array<{insumo_id: number|string, cantidad: number}> }} Product */

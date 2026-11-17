@@ -1,7 +1,18 @@
 # 🍧 Gestión de Granizados
 
-Sistema web para controlar un local de granizados con licor: ventas, inventario con costos automáticos, compras, gastos, proveedores y un dashboard con gráficas.
+Sistema web para controlar un local de granizados con licor y sin licor: ventas, inventario con costos automáticos, compras, gastos, proveedores y un dashboard con gráficas.
 Stack: **React (Vite) + Node.js/Express + PostgreSQL**.
+
+## Arquitectura del cliente
+
+El frontend se organiza por funcionalidad y separa la interfaz del acceso HTTP:
+
+- `client/src/App.jsx`: composición principal, navegación y estado de sesión.
+- `client/src/features/`: pantallas agrupadas por dominio (`auth`, `dashboard`, `sales`, `products`, `inventory`, `operations`). Cada módulo contiene sus componentes de pantalla.
+- `client/src/shared/ui.jsx`: componentes y utilidades visuales reutilizables.
+- `client/src/infrastructure/api.js`: comunicación HTTP con la API.
+
+Al agregar una pantalla, ubícala en `features/<funcionalidad>/` y registra su componente en la navegación de `App.jsx`. Las reglas de negocio del servidor siguen centralizadas en `server/src/index.js` y pueden migrarse a módulos de dominio y casos de uso como siguiente etapa.
 
 ## Qué hace
 - **Inicio de sesión:** la primera vez se crea el usuario administrador; después hay que iniciar sesión para ver o cambiar cualquier dato. Las claves se guardan cifradas (scrypt) y la sesión dura 7 días. Tras 10 intentos fallidos se bloquea el acceso 15 minutos.

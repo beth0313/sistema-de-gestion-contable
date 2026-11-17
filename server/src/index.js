@@ -6,7 +6,7 @@ import crypto from 'crypto';
 const { Pool, types } = pg;
 types.setTypeParser(1700, parseFloat); types.setTypeParser(20, parseInt); types.setTypeParser(1082, v => v);
 const pool = new Pool({ connectionString: process.env.DATABASE_URL });
-const app = express(); app.use(cors()); app.use(express.json({ limit: '2mb' }));
+const app = express(); app.use(cors()); app.use(express.json({ limit: '8mb' }));
 const OZ = 29.5735;
 class Err extends Error { constructor(s, m) { super(m); this.s = s; } }
 const h = fn => (req, res, next) => fn(req, res).catch(next);
@@ -20,7 +20,12 @@ async function tx(fn) {
 
 // ---- Migración ligera al iniciar (no hace nada si ya existe)
 await pool.query(`CREATE TABLE IF NOT EXISTS usuarios (id serial PRIMARY KEY, usuario text UNIQUE NOT NULL, clave text NOT NULL, creado timestamptz DEFAULT now());
-  ALTER TABLE insumos ADD COLUMN IF NOT EXISTS stock_minimo numeric(16,3) NOT NULL DEFAULT 0 CHECK (stock_minimo >= 0)`);
+  ALTER TABLE insumos ADD COLUMN IF NOT EXISTS stock_minimo numeric(16,3) NOT NULL DEFAULT 0 CHECK (stock_minimo >= 0);
+  ALTER TABLE ventas ADD COLUMN IF NOT EXISTS medio_pago text NOT NULL DEFAULT 'Efectivo';
+  ALTER TABLE compras ADD COLUMN IF NOT EXISTS factura text;
+  ALTER TABLE compras ADD COLUMN IF NOT EXISTS factura_nombre text;
+  ALTER TABLE gastos ADD COLUMN IF NOT EXISTS factura text;
+  ALTER TABLE gastos ADD COLUMN IF NOT EXISTS factura_nombre text`);
 
 // ---- Autenticación (scrypt + token firmado con HMAC, sin dependencias extra)
 const SECRET = process.env.JWT_SECRET || crypto.randomBytes(32).toString('hex');
@@ -92,10 +97,16 @@ app.post('/api/proveedores', h(async (req, res) => {
   const b = req.body; if (!b.nombre) throw new Err(400, 'Falta el nombre');
   res.status(201).json((await q('INSERT INTO proveedores(nombre,telefono,vende) VALUES($1,$2,$3) RETURNING *', [b.nombre, b.telefono || null, b.vende || null]))[0]);
 }));
-app.get('/api/gastos', h(async (_, res) => res.json(await q('SELECT * FROM gastos ORDER BY fecha DESC, id DESC LIMIT 200'))));
+app.get('/api/gastos', h(async (_, res) => res.json(await q('SELECT id,fecha,tipo,nota,valor,factura_nombre FROM gastos ORDER BY fecha DESC, id DESC LIMIT 200'))));
 app.post('/api/gastos', h(async (req, res) => {
   const b = req.body; if (!(+b.valor > 0)) throw new Err(400, 'Falta el valor');
-  res.status(201).json((await q('INSERT INTO gastos(fecha,tipo,nota,valor) VALUES(COALESCE($1::date,CURRENT_DATE),$2,$3,$4) RETURNING *', [b.fecha || null, b.tipo, b.nota || null, +b.valor]))[0]);
+  const archivo = b.factura || {};
+  res.status(201).json((await q('INSERT INTO gastos(fecha,tipo,nota,valor,factura,factura_nombre) VALUES(COALESCE($1::date,CURRENT_DATE),$2,$3,$4,$5,$6) RETURNING id,fecha,tipo,nota,valor,factura_nombre', [b.fecha || null, b.tipo, b.nota || null, +b.valor, archivo.contenido || null, archivo.nombre || null]))[0]);
+}));
+app.get('/api/gastos/:id/factura', h(async (req, res) => {
+  const [r] = await q('SELECT factura contenido FROM gastos WHERE id=$1', [+req.params.id]);
+  if (!r?.contenido) throw new Err(404, 'No hay una factura adjunta');
+  res.json({ contenido: r.contenido });
 }));
 for (const t of ['insumos', 'proveedores', 'productos', 'gastos'])
   app.delete(`/api/${t}/:id`, h(async (req, res) => { await q(`DELETE FROM ${t} WHERE id=$1`, [+req.params.id]); res.sendStatus(204); }));
@@ -136,13 +147,15 @@ async function calc(c, b) {
 app.get('/api/ventas', h(async (req, res) => res.json(await q('SELECT * FROM ventas WHERE ($1::date IS NULL OR fecha=$1::date) ORDER BY id DESC LIMIT 300', [req.query.fecha || null]))));
 app.post('/api/ventas', h(async (req, res) => {
   const b = req.body, n = Math.max(1, parseInt(b.cantidad) || 1);
+  const mediosPago = ['Efectivo', 'Transferencia', 'Tarjeta'];
+  if (!mediosPago.includes(b.medio_pago)) throw new Err(400, 'Selecciona un medio de pago válido');
   res.status(201).json(await tx(async c => {
     const k = await calc(c, b);
     const sabor = nn(b.sabor_id) ? k.m.get(+b.sabor_id).nombre : (b.sabor_otro || '').trim();
     if (!sabor) throw new Err(400, 'Elige un sabor');
     for (const [id, a] of k.use) { const i = k.m.get(id); if (i.stock < a * n) throw new Err(409, `Stock insuficiente de ${i.nombre}`); }
-    const v = (await c.query('INSERT INTO ventas(fecha,producto_id,sabor,tamano_oz,cantidad,precio_unit,costo_unit) VALUES(COALESCE($1::date,CURRENT_DATE),$2,$3,$4,$5,$6,$7) RETURNING *',
-      [b.fecha || null, k.p.id, sabor, k.p.tamano_oz, n, k.p.precio + (+b.cobro_extra || 0), k.costo])).rows[0];
+    const v = (await c.query('INSERT INTO ventas(fecha,producto_id,sabor,tamano_oz,cantidad,precio_unit,costo_unit,medio_pago) VALUES(COALESCE($1::date,CURRENT_DATE),$2,$3,$4,$5,$6,$7,$8) RETURNING *',
+      [b.fecha || null, k.p.id, sabor, k.p.tamano_oz, n, k.p.precio + (+b.cobro_extra || 0), k.costo, b.medio_pago])).rows[0];
     for (const [id, a] of k.use) {
       await c.query('UPDATE insumos SET stock=stock-$1 WHERE id=$2', [a * n, id]);
       await c.query('INSERT INTO venta_consumos VALUES($1,$2,$3)', [v.id, id, a * n]);
@@ -159,7 +172,7 @@ app.delete('/api/ventas/:id', h(async (req, res) => {
 }));
 
 // ---- Compras: suben el stock y actualizan el costo del insumo
-app.get('/api/compras', h(async (_, res) => res.json(await q('SELECT c.*, i.nombre insumo, p.nombre proveedor FROM compras c LEFT JOIN insumos i ON i.id=c.insumo_id LEFT JOIN proveedores p ON p.id=c.proveedor_id ORDER BY c.fecha DESC, c.id DESC LIMIT 200'))));
+app.get('/api/compras', h(async (_, res) => res.json(await q('SELECT c.id,c.fecha,c.proveedor_id,c.insumo_id,c.descripcion,c.presentaciones,c.total,c.agregado,c.factura_nombre,i.nombre insumo,p.nombre proveedor FROM compras c LEFT JOIN insumos i ON i.id=c.insumo_id LEFT JOIN proveedores p ON p.id=c.proveedor_id ORDER BY c.fecha DESC, c.id DESC LIMIT 200'))));
 app.post('/api/compras', h(async (req, res) => {
   const b = req.body, pk = +b.presentaciones || 1, total = +b.total;
   if (!(total >= 0) || b.total === '' || (!b.insumo_id && !b.descripcion)) throw new Err(400, 'Falta el valor o la descripción');
@@ -171,9 +184,15 @@ app.post('/api/compras', h(async (req, res) => {
       add = pk * i.contenido;
       await c.query('UPDATE insumos SET stock=stock+$1, costo=$2 WHERE id=$3', [add, total / pk, i.id]);
     }
-    return (await c.query('INSERT INTO compras(fecha,proveedor_id,insumo_id,descripcion,presentaciones,total,agregado) VALUES(COALESCE($1::date,CURRENT_DATE),$2,$3,$4,$5,$6,$7) RETURNING *',
-      [b.fecha || null, nn(b.proveedor_id), nn(b.insumo_id), b.descripcion || null, pk, total, add])).rows[0];
+    const archivo = b.factura || {};
+    return (await c.query('INSERT INTO compras(fecha,proveedor_id,insumo_id,descripcion,presentaciones,total,agregado,factura,factura_nombre) VALUES(COALESCE($1::date,CURRENT_DATE),$2,$3,$4,$5,$6,$7,$8,$9) RETURNING id,fecha,proveedor_id,insumo_id,descripcion,presentaciones,total,agregado,factura_nombre',
+      [b.fecha || null, nn(b.proveedor_id), nn(b.insumo_id), b.descripcion || null, pk, total, add, archivo.contenido || null, archivo.nombre || null])).rows[0];
   }));
+}));
+app.get('/api/compras/:id/factura', h(async (req, res) => {
+  const [r] = await q('SELECT factura contenido FROM compras WHERE id=$1', [+req.params.id]);
+  if (!r?.contenido) throw new Err(404, 'No hay una factura adjunta');
+  res.json({ contenido: r.contenido });
 }));
 app.delete('/api/compras/:id', h(async (req, res) => {
   await tx(async c => {
